@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Black Hole Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+        }
+        canvas {
+            display: block;
+        }
+        #controls {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px 20px;
+            border-radius: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            z-index: 1000;
+        }
+        #controls label {
+            color: white;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+        }
+        #lensing-strength {
+            width: 200px;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <label for="lensing-strength">Lensing Strength:</label>
+        <input type="range" id="lensing-strength" min="0" max="100" value="20" step="0.1">
+    </div>
+    <script type="module">
+        import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js';
+
+        // Shader code
+        const vertexShader = `
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `;
+
+        function createFragmentShader(width, height) {
+            const aspect = width / height;
+            return `
+                uniform sampler2D tDiffuse;
+                uniform vec2 blackHolePosition;
+                uniform float strength;
+                varying vec2 vUv;
+
+                void main() {
+                    vec2 center = blackHolePosition;
+                    vec2 pos = vUv - center;
+                    
+                    // Adjust position for aspect ratio
+                    pos.x *= ${aspect.toFixed(8)};
+                    
+                    float dist = length(pos);
+                    float blackHoleRadius = 0.03;
+                    
+                    // Multi-stage smooth edge transition
+                    float smoothEdge = smoothstep(blackHoleRadius - 0.002, blackHoleRadius + 0.002, dist);
+                    
+                    if (dist < blackHoleRadius - 0.002) {
+                        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                    } else {
+                        // Improved distortion calculation with multiple falloff stages
+                        float safeDist = max(dist - blackHoleRadius, 0.001);
+                        
+                        // Create a smoother transition zone
+                        float transitionZone = smoothstep(0.0, 0.01, safeDist);
+                        
+                        // Calculate base distortion with smooth falloff
+                        float baseDistortion = strength * 0.001 * exp(-safeDist * 5.0) / safeDist;
+                        
+                        // Apply multiple smoothing stages
+                        float distortionFactor = transitionZone * (1.0 - exp(-safeDist * 15.0));
+                        float finalDistortion = baseDistortion * distortionFactor;
+                        
+                        // Limit maximum distortion to prevent artifacts
+                        finalDistortion = min(finalDistortion, 0.15);
+                        
+                        // Normalize position while maintaining aspect ratio
+                        vec2 normalizedPos = pos / dist;
+                        normalizedPos.x /= ${aspect.toFixed(8)}; // Correct the aspect ratio for the offset
+                        
+                        vec2 offset = normalizedPos * finalDistortion;
+                        
+                        // Smooth UV coordinate calculation
+                        vec2 distortedUv = vUv - offset;
+                        distortedUv = clamp(distortedUv, vec2(0.0), vec2(1.0));
+                        
+                        vec4 distortedColor = texture2D(tDiffuse, distortedUv);
+                        
+                        // Final smooth blend
+                        gl_FragColor = mix(vec4(0.0, 0.0, 0.0, 1.0), distortedColor, smoothEdge);
+                    }
+                }
+            `;
+        }
+
+        // Setup scene
+        const scene = new THREE.Scene();
+        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        document.body.appendChild(renderer.domElement);
+
+        // Create plane for the effect
+        const geometry = new THREE.PlaneGeometry(2, 2);
+        const texture = new THREE.TextureLoader().load('space.jpg');
+        texture.minFilter = THREE.LinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+
+        let material = new THREE.ShaderMaterial({
+            uniforms: {
+                tDiffuse: { value: texture },
+                blackHolePosition: { value: new THREE.Vector2(0.5, 0.5) },
+                strength: { value: 20.0 }
+            },
+            vertexShader,
+            fragmentShader: createFragmentShader(window.innerWidth, window.innerHeight)
+        });
+
+        const plane = new THREE.Mesh(geometry, material);
+        scene.add(plane);
+
+        // Handle window resize
+        function resize() {
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            renderer.setSize(width, height);
+            
+            // Update shader with new aspect ratio
+            const newMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    tDiffuse: { value: texture },
+                    blackHolePosition: { value: material.uniforms.blackHolePosition.value },
+                    strength: { value: material.uniforms.strength.value }
+                },
+                vertexShader,
+                fragmentShader: createFragmentShader(width, height)
+            });
+            plane.material = newMaterial;
+            material = newMaterial;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Handle interaction
+        let isDragging = false;
+        const blackHolePosition = new THREE.Vector2(0.5, 0.5);
+        
+        function updateBlackHolePosition(x, y) {
+            blackHolePosition.set(
+                x / window.innerWidth,
+                1.0 - (y - 100) / window.innerHeight
+            );
+            material.uniforms.blackHolePosition.value = blackHolePosition;
+        }
+
+        // Touch events
+        renderer.domElement.addEventListener('touchstart', (e) => {
+            const touch = e.touches[0];
+            const rect = renderer.domElement.getBoundingClientRect();
+            const x = touch.clientX - rect.left;
+            const y = touch.clientY - rect.top;
+            
+            isDragging = true;
+            updateBlackHolePosition(x, y);
+        });
+
+        renderer.domElement.addEventListener('touchmove', (e) => {
+            if (!isDragging) return;
+            const touch = e.touches[0];
+            const rect = renderer.domElement.getBoundingClientRect();
+            const x = touch.clientX - rect.left;
+            const y = touch.clientY - rect.top;
+            updateBlackHolePosition(x, y);
+        });
+
+        renderer.domElement.addEventListener('touchend', () => {
+            isDragging = false;
+        });
+
+        // Mouse events for desktop testing
+        renderer.domElement.addEventListener('mousedown', (e) => {
+            const rect = renderer.domElement.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            isDragging = true;
+            updateBlackHolePosition(x, y);
+        });
+
+        renderer.domElement.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const rect = renderer.domElement.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            updateBlackHolePosition(x, y);
+        });
+
+        renderer.domElement.addEventListener('mouseup', () => {
+            isDragging = false;
+        });
+
+        // Strength slider
+        const strengthSlider = document.getElementById('lensing-strength');
+        strengthSlider.addEventListener('input', (e) => {
+            material.uniforms.strength.value = parseFloat(e.target.value);
+        });
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
